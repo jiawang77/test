@@ -18,40 +18,43 @@ bnmscheduler:
     lowest_decay: 0.01
 DATASET_NAME: TreeDataset
 DATA_ROOT: data/PCN
-N_POINTS: 2048
+N_POINTS: 4068
 N_COMPLETE_POINTS: 16384
 SKELETON_POINTS: 512
 dataset:
   train:
     _base_: cfgs/dataset_configs/TreeDataset.yaml
     DATA_ROOT: data/PCN
-    N_POINTS: 2048
+    N_POINTS: 4068
     N_COMPLETE_POINTS: 16384
     SKELETON_POINTS: 512
+    apply_rotation: True  # 训练时启用
     others:
       subset: train
       bs: 16
   val:
     _base_: cfgs/dataset_configs/TreeDataset.yaml
     DATA_ROOT: data/PCN
-    N_POINTS: 2048
+    N_POINTS: 4068
     N_COMPLETE_POINTS: 16384
     SKELETON_POINTS: 512
+    apply_rotation: False  # 验证时禁用
     others:
       subset: val
       bs: 16
   test:
     _base_: cfgs/dataset_configs/TreeDataset.yaml
     DATA_ROOT: data/PCN
-    N_POINTS: 2048
+    N_POINTS: 4068
     N_COMPLETE_POINTS: 16384
     SKELETON_POINTS: 512
+    apply_rotation: False  # 验证时禁用
     others:
       subset: test
       bs: 1
 model:
   NAME: TreePoinTr
-  num_pred: 16384
+  num_pred: 4068
   num_query: 224
   knn_layer: 1
   trans_dim: 384

@@ -9,13 +9,11 @@ from utils.logger import *
 from utils.AverageMeter import AverageMeter
 from utils.metrics import Metrics
 from extensions.chamfer_dist import ChamferDistanceL1, ChamferDistanceL2
-
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 def run_net(args, config, train_writer=None, val_writer=None):
     logger = get_logger(args.log_name)
     (train_sampler, train_dataloader), (_, test_dataloader) = builder.dataset_builder(args, config.dataset.train), \
-                                                              builder.dataset_builder(args, config.dataset.val)
+                                                             builder.dataset_builder(args, config.dataset.val)
     base_model = builder.model_builder(config.model)
     if args.use_gpu:
         base_model.to(args.local_rank)
@@ -56,35 +54,35 @@ def run_net(args, config, train_writer=None, val_writer=None):
         n_batches = len(train_dataloader)
         for idx, (taxonomy_ids, model_ids, data) in enumerate(train_dataloader):
             data_time.update(time.time() - batch_start_time)
-            # 检查 data 类型
+            # print_log(f"批次 {idx} (epoch {epoch}): taxonomy_ids={taxonomy_ids}, model_ids={model_ids}, data_keys={data.keys()}", logger=logger)
+            # for key, value in data.items():
+            #     # print_log(f"{key} 形状: {value.shape}", logger=logger)
             if not isinstance(data, dict):
-                logging.error(f"批次 {idx} (epoch {epoch}) 无效数据类型：{type(data)}，内容：{data}，"
-                              f"taxonomy_ids={taxonomy_ids}, model_ids={model_ids}")
-                continue  # 跳过无效批次
+                logging.error(f"批次 {idx} (epoch {epoch}) 无效数据类型：{type(data)}，内容：{data}")
+                continue
             npoints = config.dataset.train._base_.N_POINTS
             dataset_name = config.dataset.train._base_.NAME
             if dataset_name == 'TreeDataset':
                 try:
-                    partial = data['input'].cuda()  # 第 69 行
-                    gt = data['gt'].cuda()
-                    skeleton = data['skeleton'].cuda()
+                    partial = data['input'].cuda(non_blocking=True)
+                    gt = data['gt'].cuda(non_blocking=True)
+                    skeleton = data['skeleton'].cuda(non_blocking=True)
                 except KeyError as e:
-                    logging.error(f"批次 {idx} (epoch {epoch}) 缺少键：{str(e)}，data={data}, "
-                                  f"taxonomy_ids={taxonomy_ids}, model_ids={model_ids}")
+                    logging.error(f"批次 {idx} (epoch {epoch}) 缺少键：{str(e)}，data={data}")
                     continue
             elif dataset_name in ['PCN', 'Completion3D', 'Projected_ShapeNet']:
-                partial = data['input'].cuda() if isinstance(data, dict) else data[0].cuda()
-                gt = data['gt'].cuda() if isinstance(data, dict) else data[1].cuda()
+                partial = data['input'].cuda(non_blocking=True) if isinstance(data, dict) else data[0].cuda(non_blocking=True)
+                gt = data['gt'].cuda(non_blocking=True) if isinstance(data, dict) else data[1].cuda(non_blocking=True)
                 skeleton = data.get('skeleton', None)
                 if skeleton is not None:
-                    skeleton = skeleton.cuda()
+                    skeleton = skeleton.cuda(non_blocking=True)
                 if config.dataset.train._base_.CARS and idx == 0:
                     print_log('padding while KITTI training', logger=logger)
                     partial = misc.random_dropping(partial, epoch)
             elif dataset_name == 'ShapeNet':
-                gt = data.cuda()
+                gt = data.cuda(non_blocking=True)
                 partial, _ = misc.seprate_point_cloud(gt, npoints, [int(npoints * 1/4), int(npoints * 3/4)], fixed_points=None)
-                partial = partial.cuda()
+                partial = partial.cuda(non_blocking=True)
                 skeleton = None
             else:
                 raise NotImplementedError(f'Train phase do not support {dataset_name}')
@@ -93,7 +91,7 @@ def run_net(args, config, train_writer=None, val_writer=None):
             sparse_loss, dense_loss = base_model.module.get_loss(ret, gt, epoch, skeleton)
             _loss = sparse_loss + dense_loss
             _loss.backward()
-            skeleton_loss = (dense_loss - ChamferDisL1(ret[-1], gt)) if skeleton is not None else torch.tensor(0.0, device=gt.device)
+            skeleton_loss = torch.mean(torch.min(torch.cdist(ret[-1], skeleton), dim=-1)[0]) if skeleton is not None else torch.tensor(0.0, device=gt.device)
             if args.distributed:
                 sparse_loss = dist_utils.reduce_tensor(sparse_loss, args)
                 dense_loss = dist_utils.reduce_tensor(dense_loss, args)
@@ -142,140 +140,122 @@ def run_net(args, config, train_writer=None, val_writer=None):
     if train_writer is not None and val_writer is not None:
         train_writer.close()
         val_writer.close()
-
 def validate(base_model, test_dataloader, epoch, ChamferDisL1, ChamferDisL2, val_writer, args, config, logger=None):
     print_log(f"[VALIDATION] Start validating epoch {epoch}", logger=logger)
     base_model.eval()
-
     test_losses = AverageMeter(['SparseLossL1', 'SparseLossL2', 'DenseLossL1', 'DenseLossL2', 'SkeletonLoss'])
     test_metrics = AverageMeter(Metrics.names())
     category_metrics = dict()
     n_samples = len(test_dataloader)
-
-    interval = n_samples // 10
-
+    interval = max(1, n_samples // 10)  # 修复：确保interval至少为1
     with torch.no_grad():
         for idx, (taxonomy_ids, model_ids, data) in enumerate(test_dataloader):
             taxonomy_id = taxonomy_ids[0] if isinstance(taxonomy_ids[0], str) else taxonomy_ids[0].item()
             model_id = model_ids[0]
-
+            # print_log(f"验证批次 {idx}: taxonomy_id={taxonomy_id}, model_id={model_id}, data_keys={data.keys()}", logger=logger)
+            # for key, value in data.items():
+            #     print_log(f"{key} 形状: {value.shape}", logger=logger)
             npoints = config.dataset.val._base_.N_POINTS
             dataset_name = config.dataset.val._base_.NAME
             if dataset_name == 'TreeDataset':
-                partial = data['input'].cuda()
-                gt = data['gt'].cuda()
-                skeleton = data['skeleton'].cuda()
+                partial = data['input'].cuda(non_blocking=True)
+                gt = data['gt'].cuda(non_blocking=True)
+                skeleton = data['skeleton'].cuda(non_blocking=True)
             elif dataset_name in ['PCN', 'Completion3D', 'Projected_ShapeNet']:
-                partial = data['input'].cuda() if isinstance(data, dict) else data[0].cuda()
-                gt = data['gt'].cuda() if isinstance(data, dict) else data[1].cuda()
+                partial = data['input'].cuda(non_blocking=True) if isinstance(data, dict) else data[0].cuda(non_blocking=True)
+                gt = data['gt'].cuda(non_blocking=True) if isinstance(data, dict) else data[1].cuda(non_blocking=True)
                 skeleton = data.get('skeleton', None)
                 if skeleton is not None:
-                    skeleton = skeleton.cuda()
+                    skeleton = skeleton.cuda(non_blocking=True)
             elif dataset_name == 'ShapeNet':
-                gt = data.cuda()
+                gt = data.cuda(non_blocking=True)
                 partial, _ = misc.seprate_point_cloud(gt, npoints, [int(npoints * 1/4), int(npoints * 3/4)], fixed_points=None)
-                partial = partial.cuda()
+                partial = partial.cuda(non_blocking=True)
                 skeleton = None
             else:
                 raise NotImplementedError(f'Validation phase do not support {dataset_name}')
-
             ret = base_model(partial, skeleton)
             coarse_points = ret[0]
             dense_points = ret[-1]
-
             sparse_loss_l1 = ChamferDisL1(coarse_points, gt)
             sparse_loss_l2 = ChamferDisL2(coarse_points, gt)
             dense_loss_l1 = ChamferDisL1(dense_points, gt)
             dense_loss_l2 = ChamferDisL2(dense_points, gt)
             skeleton_loss = torch.mean(torch.min(torch.cdist(dense_points, skeleton), dim=-1)[0]) if skeleton is not None else torch.tensor(0.0, device=gt.device)
-
             if args.distributed:
                 sparse_loss_l1 = dist_utils.reduce_tensor(sparse_loss_l1, args)
                 sparse_loss_l2 = dist_utils.reduce_tensor(sparse_loss_l2, args)
                 dense_loss_l1 = dist_utils.reduce_tensor(dense_loss_l1, args)
                 dense_loss_l2 = dist_utils.reduce_tensor(dense_loss_l2, args)
                 skeleton_loss = dist_utils.reduce_tensor(skeleton_loss, args)
-
             test_losses.update([sparse_loss_l1.item() * 1000, sparse_loss_l2.item() * 1000,
-                               dense_loss_l1.item() * 1000, dense_loss_l2.item() * 1000,
-                               skeleton_loss.item() * 1000])
-
+                                dense_loss_l1.item() * 1000, dense_loss_l2.item() * 1000,
+                                skeleton_loss.item() * 1000])
             _metrics = Metrics.get(dense_points, gt)
             if args.distributed:
                 _metrics = [dist_utils.reduce_tensor(_metric, args).item() for _metric in _metrics]
             else:
                 _metrics = [_metric.item() for _metric in _metrics]
-
             for _taxonomy_id in taxonomy_ids:
                 if _taxonomy_id not in category_metrics:
                     category_metrics[_taxonomy_id] = AverageMeter(Metrics.names())
                 category_metrics[_taxonomy_id].update(_metrics)
-
             if (idx + 1) % interval == 0:
                 print_log('Test[%d/%d] Taxonomy = %s Sample = %s Losses = %s Metrics = %s' %
                           (idx + 1, n_samples, taxonomy_id, model_id, ['%.4f' % l for l in test_losses.val()],
                            ['%.4f' % m for m in _metrics]), logger=logger)
-
         for _, v in category_metrics.items():
             test_metrics.update(v.avg())
         print_log('[Validation] EPOCH: %d  Metrics = %s' % (epoch, ['%.4f' % m for m in test_metrics.avg()]), logger=logger)
-
         if args.distributed:
             torch.cuda.synchronize()
-
         if val_writer is not None:
             val_writer.add_scalar('Loss/Epoch/Sparse', test_losses.avg(0), epoch)
             val_writer.add_scalar('Loss/Epoch/Dense', test_losses.avg(2), epoch)
             val_writer.add_scalar('Loss/Epoch/Skeleton', test_losses.avg(4), epoch)
             for i, metric in enumerate(test_metrics.items):
                 val_writer.add_scalar('Metric/%s' % metric, test_metrics.avg(i), epoch)
-
     return Metrics(config.consider_metric, test_metrics.avg())
-
 def test_net(args, config):
     logger = get_logger(args.log_name)
     print_log('Tester start ... ', logger=logger)
     _, test_dataloader = builder.dataset_builder(args, config.dataset.test)
- 
     base_model = builder.model_builder(config.model)
     builder.load_model(base_model, args.ckpts, logger=logger)
     if args.use_gpu:
         base_model.to(args.local_rank)
-
     if args.distributed:
         raise NotImplementedError()
-
     ChamferDisL1 = ChamferDistanceL1()
     ChamferDisL2 = ChamferDistanceL2()
-
     test(base_model, test_dataloader, ChamferDisL1, ChamferDisL2, args, config, logger=logger)
-
 def test(base_model, test_dataloader, ChamferDisL1, ChamferDisL2, args, config, logger=None):
     base_model.eval()
     test_losses = AverageMeter(['SparseLossL1', 'SparseLossL2', 'DenseLossL1', 'DenseLossL2', 'SkeletonLoss'])
     test_metrics = AverageMeter(Metrics.names())
     category_metrics = dict()
     n_samples = len(test_dataloader)
-
     with torch.no_grad():
         for idx, (taxonomy_ids, model_ids, data) in enumerate(test_dataloader):
             taxonomy_id = taxonomy_ids[0] if isinstance(taxonomy_ids[0], str) else taxonomy_ids[0].item()
             model_id = model_ids[0]
-
+            print_log(f"测试批次 {idx}: taxonomy_id={taxonomy_id}, model_id={model_id}, data_keys={data.keys()}", logger=logger)
+            # for key, value in data.items():
+            #     print_log(f"{key} 形状: {value.shape}", logger=logger)
             npoints = config.dataset.test._base_.N_POINTS
             dataset_name = config.dataset.test._base_.NAME
             if dataset_name == 'TreeDataset':
-                partial = data['input'].cuda()
-                gt = data['gt'].cuda()
-                skeleton = data['skeleton'].cuda()
+                partial = data['input'].cuda(non_blocking=True)
+                gt = data['gt'].cuda(non_blocking=True)
+                skeleton = data['skeleton'].cuda(non_blocking=True)
             elif dataset_name in ['PCN', 'Completion3D', 'Projected_ShapeNet']:
-                partial = data['input'].cuda() if isinstance(data, dict) else data[0].cuda()
-                gt = data['gt'].cuda() if isinstance(data, dict) else data[1].cuda()
+                partial = data['input'].cuda(non_blocking=True) if isinstance(data, dict) else data[0].cuda(non_blocking=True)
+                gt = data['gt'].cuda(non_blocking=True) if isinstance(data, dict) else data[1].cuda(non_blocking=True)
                 skeleton = data.get('skeleton', None)
                 if skeleton is not None:
-                    skeleton = skeleton.cuda()
+                    skeleton = skeleton.cuda(non_blocking=True)
             elif dataset_name == 'ShapeNet':
-                gt = data.cuda()
+                gt = data.cuda(non_blocking=True)
                 choice = [torch.Tensor([1,1,1]), torch.Tensor([1,1,-1]), torch.Tensor([1,-1,1]), torch.Tensor([-1,1,1]),
                           torch.Tensor([-1,-1,1]), torch.Tensor([-1,1,-1]), torch.Tensor([1,-1,-1]), torch.Tensor([-1,-1,-1])]
                 num_crop = int(npoints * config.dataset.test._base_.get('crop_ratio', 0.5))
@@ -285,22 +265,19 @@ def test(base_model, test_dataloader, ChamferDisL1, ChamferDisL2, args, config, 
                     ret = base_model(partial, skeleton)
                     coarse_points = ret[0]
                     dense_points = ret[-1]
-
                     sparse_loss_l1 = ChamferDisL1(coarse_points, gt)
                     sparse_loss_l2 = ChamferDisL2(coarse_points, gt)
                     dense_loss_l1 = ChamferDisL1(dense_points, gt)
                     dense_loss_l2 = ChamferDisL2(dense_points, gt)
                     skeleton_loss = torch.mean(torch.min(torch.cdist(dense_points, skeleton), dim=-1)[0]) if skeleton is not None else torch.tensor(0.0, device=gt.device)
-
                     test_losses.update([sparse_loss_l1.item() * 1000, sparse_loss_l2.item() * 1000, dense_loss_l1.item() * 1000, dense_loss_l2.item() * 1000, skeleton_loss.item() * 1000])
-
                     _metrics = Metrics.get(dense_points, gt, require_emd=True)
                     if taxonomy_id not in category_metrics:
                         category_metrics[taxonomy_id] = AverageMeter(Metrics.names())
                     category_metrics[taxonomy_id].update(_metrics)
                 continue
             elif dataset_name == 'KITTI':
-                partial = data.cuda()
+                partial = data.cuda(non_blocking=True)
                 ret = base_model(partial, None)
                 dense_points = ret[-1]
                 target_path = os.path.join(args.experiment_path, 'vis_result')
@@ -313,35 +290,28 @@ def test(base_model, test_dataloader, ChamferDisL1, ChamferDisL2, args, config, 
                 continue
             else:
                 raise NotImplementedError(f'Test phase do not support {dataset_name}')
-
             ret = base_model(partial, skeleton)
             coarse_points = ret[0]
             dense_points = ret[-1]
-
             sparse_loss_l1 = ChamferDisL1(coarse_points, gt)
             sparse_loss_l2 = ChamferDisL2(coarse_points, gt)
             dense_loss_l1 = ChamferDisL1(dense_points, gt)
             dense_loss_l2 = ChamferDisL2(dense_points, gt)
             skeleton_loss = torch.mean(torch.min(torch.cdist(dense_points, skeleton), dim=-1)[0]) if skeleton is not None else torch.tensor(0.0, device=gt.device)
-
             test_losses.update([sparse_loss_l1.item() * 1000, sparse_loss_l2.item() * 1000, dense_loss_l1.item() * 1000, dense_loss_l2.item() * 1000, skeleton_loss.item() * 1000])
-
             _metrics = Metrics.get(dense_points, gt, require_emd=True)
             if taxonomy_id not in category_metrics:
                 category_metrics[taxonomy_id] = AverageMeter(Metrics.names())
             category_metrics[taxonomy_id].update(_metrics)
-
             if (idx + 1) % 200 == 0:
                 print_log('Test[%d/%d] Taxonomy = %s Sample = %s Losses = %s Metrics = %s' %
                           (idx + 1, n_samples, taxonomy_id, model_id, ['%.4f' % l for l in test_losses.val()],
                            ['%.4f' % m for m in _metrics]), logger=logger)
-
         if dataset_name == 'KITTI':
             return
         for _, v in category_metrics.items():
             test_metrics.update(v.avg())
         print_log('[TEST] Metrics = %s' % (['%.4f' % m for m in test_metrics.avg()]), logger=logger)
-
     shapenet_dict = json.load(open('./data/shapenet_synset_dict.json', 'r'))
     print_log('============================ TEST RESULTS ============================', logger=logger)
     msg = 'Taxonomy\t#Sample\t'
@@ -349,14 +319,12 @@ def test(base_model, test_dataloader, ChamferDisL1, ChamferDisL2, args, config, 
         msg += metric + '\t'
     msg += '#ModelName\t'
     print_log(msg, logger=logger)
-
     for taxonomy_id in category_metrics:
         msg = f'{taxonomy_id}\t{category_metrics[taxonomy_id].count(0)}\t'
         for value in category_metrics[taxonomy_id].avg():
             msg += '%.3f \t' % value
-        msg += shapenet_dict[taxonomy_id] + '\t'
+        msg += shapenet_dict.get(taxonomy_id, 'Unknown') + '\t'
         print_log(msg, logger=logger)
-
     msg = 'Overall \t\t'
     for value in test_metrics.avg():
         msg += '%.3f \t' % value

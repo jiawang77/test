@@ -1,5 +1,6 @@
 NAME: TreeDataset
-DATA_ROOT: data/PCN
+DATA_ROOT: /home/lhz/PoinTr-master/data/PCN
 N_POINTS: 2048
 N_COMPLETE_POINTS: 16384
 SKELETON_POINTS: 512
+apply_rotation: True  # 启用随机旋转变换
